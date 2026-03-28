@@ -1,0 +1,49 @@
+name: Kereby Watcher
+
+on:
+  schedule:
+    # Run every 6 hours. The script internally loops for ~5.5 hours polling every 45s.
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+concurrency:
+  group: watcher-group
+  cancel-in-progress: true
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 # Max runtime before Github kills it (close to 6 hours limit)
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          
+      # Using cache to persist seen_ids.json across runs
+      - name: Cache seen IDs
+        uses: actions/cache@v4
+        with:
+          path: seen_ids.json
+          key: seen-ids-${{ github.run_id }}
+          restore-keys: |
+            seen-ids-
+
+      - name: Run Watcher
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_MENTION_USER_ID: ${{ secrets.DISCORD_MENTION_USER_ID }}
+          USER_NAME: ${{ secrets.USER_NAME }}
+          USER_EMAIL: ${{ secrets.USER_EMAIL }}
+          USER_PHONE: ${{ secrets.USER_PHONE }}
+          WATCHER_RUNS: 460 # 460 runs * 45s sleep = ~5.75 hours, keeping us safely under the 6h max
+          WATCHER_SLEEP_SECONDS: 45
+        run: python watcher.pyw
+
+      # We must save the cache explicitly if it changed during this step
+      # The actions/cache natively saves post-job, but using a specific action or just
+      # letting it handle standard key prefix fallback is usually enough.
