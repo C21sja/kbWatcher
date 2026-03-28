@@ -98,6 +98,18 @@ def post_discord_payload(payload):
         return False
 
 
+def post_discord_error(error_msg):
+    if not WEBHOOK_URL:
+        return False
+    mention = build_discord_mention()
+    payload = {
+        "content" : f"{mention} :warning: **Watcher Error / Failsafe Triggered** :warning:\n```\n{error_msg}\n```"
+    }
+    if DISCORD_MENTION_USER_ID:
+        payload["allowed_mentions"] = {"users": [DISCORD_MENTION_USER_ID]}
+    return post_discord_payload(payload)
+
+
 def build_discord_mention():
     if DISCORD_MENTION_USER_ID:
         return f"<@{DISCORD_MENTION_USER_ID}>"
@@ -295,30 +307,52 @@ def fetch_apartments():
             return data.get("items", [])
     except Exception as e:
         print(f"Error fetching API: {e}")
+        try:
+            post_discord_error(f"API Fetch Error: {e}")
+        except:
+            pass
         return []
 
 
 def main():
-    seen_states = load_seen_states()
-    is_first_run = len(seen_states) == 0
+    try:
+        seen_states = load_seen_states()
+        is_first_run = len(seen_states) == 0
 
-    if is_first_run:
-        print("First run detected. Caching existing properties without screaming in Discord.")
-
-    for run_num in range(1, RUN_COUNT + 1):
-        print(f"--- Run {run_num}/{RUN_COUNT} - {datetime.now().strftime('%H:%M:%S')} ---")
-        items = fetch_apartments()
-        print(f"Fetched {len(items)} properties.")
-
-        for item in items:
-            process_listing(item, seen_states, is_first_run)
-        
-        # After the first pass, it is no longer the first run ever
         if is_first_run:
-            is_first_run = False
+            print("First run detected. Caching existing properties without screaming in Discord.")
+
+        for run_num in range(1, RUN_COUNT + 1):
+            print(f"--- Run {run_num}/{RUN_COUNT} - {datetime.now().strftime('%H:%M:%S')} ---")
+            items = fetch_apartments()
+            print(f"Fetched {len(items)} properties.")
+
+            for item in items:
+                try:
+                    process_listing(item, seen_states, is_first_run)
+                except Exception as e:
+                    print(f"Error processing item: {e}")
+                    try:
+                        post_discord_error(f"Error processing listing {item.get('id', 'Unknown')}: {e}")
+                    except:
+                        pass
             
-        if run_num < RUN_COUNT:
-            time.sleep(SLEEP_SECONDS)
+            # After the first pass, it is no longer the first run ever
+            if is_first_run:
+                is_first_run = False
+                
+            if run_num < RUN_COUNT:
+                time.sleep(SLEEP_SECONDS)
+                
+    except Exception as e:
+        import traceback
+        err = traceback.format_exc()
+        print(f"Fatal error in main loop: {err}")
+        try:
+            post_discord_error(f"Fatal Exception in Watcher:\n{err[-1500:]}")
+        except:
+            pass
+        raise
 
 if __name__ == "__main__":
     main()

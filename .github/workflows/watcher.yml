@@ -1,5 +1,8 @@
 name: Kereby Watcher
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   schedule:
     # Run every 6 hours. The script internally loops for ~5.5 hours polling every 45s.
@@ -42,7 +45,7 @@ jobs:
           USER_PHONE: ${{ secrets.USER_PHONE }}
           WATCHER_RUNS: 460 # 460 runs * 45s sleep = ~5.75 hours, keeping us safely under the 6h max
           WATCHER_SLEEP_SECONDS: 45
-        run: python watcher.pyw
+        run: python watcher.py
 
       # We must save the cache explicitly if it changed during this step
       # The actions/cache natively saves post-job, but using a specific action or just
