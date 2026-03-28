@@ -1,8 +1,5 @@
 name: Kereby Watcher
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 on:
   schedule:
     # Run every 6 hours. The script internally loops for ~5.5 hours polling every 45s.
@@ -20,16 +17,16 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           
       # Using cache to persist seen_ids.json across runs
       - name: Cache seen IDs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: seen_ids.json
           key: seen-ids-${{ github.run_id }}
