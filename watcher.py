@@ -6,6 +6,12 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Configurations
 API_URL = "https://api.jorato.com/tenancies?visibility=public&showAll=true&key=2gXoBtKvFMMgKJ1VBJ5G5pNr2GD"
 APPLY_URL = "https://us-central1-kerebyudlejning-dk.cloudfunctions.net/createShowcasingRequest?key=2gXoBtKvFMMgKJ1VBJ5G5pNr2GD"
@@ -14,7 +20,7 @@ HEADERS = {
     "Content-Type": "application/json;charset=UTF-8",
     "Origin": "https://kerebyudlejning.dk",
     "Referer": "https://kerebyudlejning.dk/",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
 }
 SEEN_IDS_FILE = "seen_ids.json"
 
@@ -24,6 +30,7 @@ DISCORD_MENTION_USER_ID = os.environ.get("DISCORD_MENTION_USER_ID")
 USER_NAME = os.environ.get("USER_NAME", "Test Testsen")
 USER_EMAIL = os.environ.get("USER_EMAIL", "test@example.com")
 USER_PHONE = os.environ.get("USER_PHONE", "12345678")
+DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 try:
     RUN_COUNT = int(os.environ.get("WATCHER_RUNS", 440))
@@ -171,6 +178,8 @@ def attempt_application(apt):
     # But since it's just a payload field, we can construct a dummy or base it on data we have
     url_slug = "https://kerebyudlejning.dk/ledige-boliger/"
 
+    note_text = os.environ.get("USER_MESSAGE", "")
+
     message_text = f"Jeg vil gerne komme til en fremvisning af nedenstående bolig på datoen {booking_time_str.split(', kl')[0]}. Disse tider passer mig: 11:00"
 
     payload = {
@@ -179,7 +188,7 @@ def attempt_application(apt):
         "phoneExtension": "45",
         "email": USER_EMAIL,
         "startsAt": starts_at_str,
-        "note": "",
+        "note": note_text,
         "communicationLanguage": "danish",
         "tenancyId": tenancy_id,
         "booking_time": booking_time_str,
@@ -191,6 +200,11 @@ def attempt_application(apt):
         "parking": False,
         "screeningAnswers": []
     }
+
+    if DRY_RUN:
+        print(f"[DRY RUN] Simulating application to {tenancy_id} for {booking_time_str}")
+        print(f"[DRY RUN] Payload that would be sent to Kereby:\n{json.dumps(payload, indent=2)}")
+        return True, f"{booking_time_str} (DRY RUN)"
 
     req = urllib.request.Request(
         APPLY_URL,
@@ -315,6 +329,26 @@ def fetch_apartments():
 
 
 def main():
+    if "--test" in sys.argv:
+        print("--- RUNNING INSTANT TEST MODE ---")
+        global DRY_RUN
+        DRY_RUN = True
+        items = fetch_apartments()
+        if items:
+            apt = items[0]
+            # Mock the apartment data so it perfectly passes all criteria checks
+            apt["state"] = "Available"
+            apt["classification"] = "Residential"
+            apt["monthlyRent"] = {"value": 5000}
+            apt["size"] = {"value": 100}
+            if "address" not in apt:
+                apt["address"] = {}
+            apt["address"]["zipCode"] = "1000"
+            apt["address"]["street"] = "Test Street 1"
+            process_listing(apt, {}, False)
+        print("--- TEST COMPLETE ---")
+        return
+
     try:
         seen_states = load_seen_states()
         is_first_run = len(seen_states) == 0

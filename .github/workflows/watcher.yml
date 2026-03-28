@@ -40,6 +40,7 @@ jobs:
           USER_NAME: ${{ secrets.USER_NAME }}
           USER_EMAIL: ${{ secrets.USER_EMAIL }}
           USER_PHONE: ${{ secrets.USER_PHONE }}
+          USER_MESSAGE: ${{ secrets.USER_MESSAGE }}
           WATCHER_RUNS: 460 # 460 runs * 45s sleep = ~5.75 hours, keeping us safely under the 6h max
           WATCHER_SLEEP_SECONDS: 45
         run: python watcher.py
