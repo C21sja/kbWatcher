@@ -13,7 +13,7 @@ concurrency:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 350 # Max runtime before Github kills it (close to 6 hours limit)
+    timeout-minutes: 355 # Slightly more headroom while still leaving ~5 min before the next scheduled run
     
     steps:
       - name: Checkout repository
