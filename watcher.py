@@ -237,6 +237,19 @@ def process_listing(apt, seen_states, is_first_run):
     if seen_states.get(apt_id) == status:
         return
     
+    # Ignore parking spaces and 0 size properties entirely
+    title = apt.get("title", "").lower()
+    street = apt.get("address", {}).get("street", "").lower()
+    try:
+        size = float(apt.get("size", {}).get("value", 0))
+    except Exception:
+        size = 0.0
+
+    if "p-plads" in title or "p-plads" in street or size <= 0.0:
+        seen_states[apt_id] = status
+        save_seen_states(seen_states)
+        return
+
     # New or updated listing!
     previous_status = seen_states.get(apt_id)
 
