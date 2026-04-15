@@ -1,3 +1,4 @@
 __pycache__/
 seen_ids.json
+application_log.json
 .env

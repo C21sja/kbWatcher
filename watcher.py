@@ -23,6 +23,13 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
 }
 SEEN_IDS_FILE = "seen_ids.json"
+APPLICATION_LOG_FILE = "application_log.json"
+
+KNOWN_PAYLOAD_FIELDS = {
+    "name", "phoneNumber", "phoneExtension", "email", "startsAt", "note",
+    "communicationLanguage", "tenancyId", "booking_time", "message",
+    "subject", "address", "url", "commercial", "parking", "screeningAnswers",
+}
 
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 DISCORD_MENTION_USER_ID = os.environ.get("DISCORD_MENTION_USER_ID")
@@ -66,6 +73,97 @@ def get_next_workday_11am():
     starts_at_str = utc_starts_at.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     return starts_at_str, booking_time_str
+
+
+def load_application_log():
+    if os.path.exists(APPLICATION_LOG_FILE):
+        try:
+            with open(APPLICATION_LOG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def append_application_log(entry):
+    log = load_application_log()
+    log.append(entry)
+    try:
+        with open(APPLICATION_LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(log, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error writing application log: {e}")
+
+
+def inspect_listing(apt):
+    """Inspect a listing for fields that suggest extra requirements we might miss.
+    Returns a dict with screening_questions found, unknown keys, and warnings."""
+    warnings = []
+    screening_questions = apt.get("screeningQuestions") or apt.get("screening_questions") or []
+    if screening_questions:
+        warnings.append(f"Listing has {len(screening_questions)} screening question(s) that we send empty")
+
+    known_listing_keys = {
+        "id", "state", "classification", "monthlyRent", "size", "address",
+        "title", "description", "descriptions", "images", "floorPlans",
+        "availableFrom", "deposit", "prepaidRent", "rooms", "floor",
+        "petsAllowed", "balcony", "elevator", "type", "types", "created",
+        "updated", "area", "heatingType", "energyLabel", "utilities",
+        "screeningQuestions", "screening_questions", "customFields",
+        "requirements", "applicationRequirements", "documents", "tags",
+        "features", "coordinates", "lat", "lng", "latitude", "longitude",
+        "additionalDetails", "appliances", "campaign", "currentCaseId",
+        "expenses", "kind", "locations", "propertyFacilities", "propertyId",
+        "prospectus", "publishedAt", "responsibleEmployee",
+        "tenancyFacilities", "terms", "virtualTour", "visibility",
+    }
+    unexpected_keys = set(apt.keys()) - known_listing_keys
+    if unexpected_keys:
+        warnings.append(f"Listing has unknown keys we may need to handle: {sorted(unexpected_keys)}")
+
+    custom_fields = apt.get("customFields") or apt.get("applicationRequirements") or []
+    if custom_fields:
+        warnings.append(f"Listing has custom/application fields: {json.dumps(custom_fields, ensure_ascii=False)[:300]}")
+
+    requirements = apt.get("requirements")
+    if requirements:
+        warnings.append(f"Listing has requirements field: {json.dumps(requirements, ensure_ascii=False)[:300]}")
+
+    documents = apt.get("documents")
+    if documents:
+        warnings.append(f"Listing requires documents: {json.dumps(documents, ensure_ascii=False)[:200]}")
+
+    return {
+        "screening_questions": screening_questions,
+        "unexpected_keys": sorted(unexpected_keys) if unexpected_keys else [],
+        "warnings": warnings,
+    }
+
+
+def validate_pre_submit(apt, payload, inspection):
+    """Returns (ok: bool, issues: list[str]).
+    ok=False means we should NOT submit — critical field gap detected."""
+    issues = []
+
+    if not payload.get("tenancyId"):
+        issues.append("CRITICAL: tenancyId is missing from payload")
+
+    if not payload.get("name") or payload["name"] == "Test Testsen":
+        issues.append("CRITICAL: name is missing or placeholder")
+
+    if not payload.get("email") or payload["email"] == "test@example.com":
+        issues.append("CRITICAL: email is missing or placeholder")
+
+    if not payload.get("phoneNumber") or payload["phoneNumber"] == "12345678":
+        issues.append("CRITICAL: phone is missing or placeholder")
+
+    if inspection["screening_questions"]:
+        sq = inspection["screening_questions"]
+        if not payload.get("screeningAnswers"):
+            issues.append(f"CRITICAL: {len(sq)} screening question(s) exist but screeningAnswers is empty")
+
+    critical = any(i.startswith("CRITICAL") for i in issues)
+    return (not critical), issues
 
 
 def load_seen_states():
@@ -164,22 +262,20 @@ def check_criteria(apt):
 def attempt_application(apt):
     """
     Sends the POST request to book a viewing for next workday at 11:00.
+    Validates payload against listing schema before sending and logs the full
+    request/response cycle for audit.
     """
     starts_at_str, booking_time_str = get_next_workday_11am()
     
-    tenancy_id = apt.get("id") # The UUID in the items array is the tenancy ID used in the application
+    tenancy_id = apt.get("id")
     address = apt.get("address", {})
     street = address.get("street", "Unknown")
     zip_code = address.get("zipCode", "")
     city = address.get("city", "")
     full_address = f"{street}, {zip_code} {city}"
 
-    # Build the URL based on title string formatting commonly used
-    # But since it's just a payload field, we can construct a dummy or base it on data we have
     url_slug = "https://kerebyudlejning.dk/ledige-boliger/"
-
     note_text = os.environ.get("USER_MESSAGE", "")
-
     message_text = f"Jeg vil gerne komme til en fremvisning af nedenstående bolig på datoen {booking_time_str.split(', kl')[0]}. Disse tider passer mig: 11:00"
 
     payload = {
@@ -201,9 +297,40 @@ def attempt_application(apt):
         "screeningAnswers": []
     }
 
+    inspection = inspect_listing(apt)
+    submit_ok, validation_issues = validate_pre_submit(apt, payload, inspection)
+
+    log_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "tenancy_id": tenancy_id,
+        "address": full_address,
+        "booking_time": booking_time_str,
+        "inspection": inspection,
+        "validation_issues": validation_issues,
+        "payload_fields": sorted(payload.keys()),
+        "listing_keys": sorted(apt.keys()),
+        "dry_run": DRY_RUN,
+        "submitted": False,
+        "response_status": None,
+        "response_body": None,
+        "result": None,
+    }
+
+    if validation_issues:
+        print(f"[VALIDATION] {tenancy_id}: {validation_issues}")
+
+    if not submit_ok:
+        log_entry["result"] = "BLOCKED_BY_VALIDATION"
+        append_application_log(log_entry)
+        return False, f"Blocked: {'; '.join(validation_issues)}"
+
     if DRY_RUN:
         print(f"[DRY RUN] Simulating application to {tenancy_id} for {booking_time_str}")
         print(f"[DRY RUN] Payload that would be sent to Kereby:\n{json.dumps(payload, indent=2)}")
+        if inspection["warnings"]:
+            print(f"[DRY RUN] Inspection warnings: {inspection['warnings']}")
+        log_entry["result"] = "DRY_RUN"
+        append_application_log(log_entry)
         return True, f"{booking_time_str} (DRY RUN)"
 
     req = urllib.request.Request(
@@ -215,14 +342,85 @@ def attempt_application(apt):
 
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
+            response_body = response.read().decode("utf-8", errors="replace")
+            log_entry["response_status"] = response.status
+            log_entry["response_body"] = response_body[:2000]
+            log_entry["submitted"] = True
+
+            response_data = None
+            try:
+                response_data = json.loads(response_body)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
             if response.status == 200:
+                log_entry["result"] = "SUCCESS"
+                append_application_log(log_entry)
+
+                if response_data and _response_has_issues(response_data):
+                    issue_summary = f"API returned 200 but response suggests issues: {response_body[:500]}"
+                    print(f"[RESPONSE WARNING] {tenancy_id}: {issue_summary}")
+                    post_discord_warning(tenancy_id, full_address, inspection["warnings"], validation_issues, issue_summary)
+
+                elif inspection["warnings"]:
+                    post_discord_warning(tenancy_id, full_address, inspection["warnings"], validation_issues, None)
+
                 print(f"Successfully applied to {tenancy_id} for {booking_time_str}")
                 return True, booking_time_str
             else:
+                log_entry["result"] = f"HTTP_{response.status}"
+                append_application_log(log_entry)
                 return False, f"HTTP {response.status}"
     except Exception as e:
         print(f"Application exception for {tenancy_id}: {e}")
+        error_body = ""
+        if hasattr(e, "read"):
+            try:
+                error_body = e.read().decode("utf-8", errors="replace")[:2000]
+            except Exception:
+                pass
+        log_entry["response_status"] = getattr(e, "code", None)
+        log_entry["response_body"] = error_body or str(e)
+        log_entry["result"] = "EXCEPTION"
+        log_entry["submitted"] = True
+        append_application_log(log_entry)
         return False, str(e)
+
+
+def _response_has_issues(data):
+    """Heuristic check for error signals in a 200 response body."""
+    if isinstance(data, dict):
+        for key in ("error", "errors", "message", "validationErrors", "missing", "rejected"):
+            val = data.get(key)
+            if val and val not in ([], {}, "", None, False):
+                return True
+        if data.get("success") is False or data.get("ok") is False:
+            return True
+    return False
+
+
+def post_discord_warning(tenancy_id, address, inspection_warnings, validation_issues, response_issue):
+    """Alert on Discord when an application may be incomplete."""
+    if not WEBHOOK_URL:
+        return
+    mention = build_discord_mention()
+    lines = [f"{mention} :mag: **Application Quality Alert** — `{address}`"]
+    if inspection_warnings:
+        lines.append("**Listing inspection:**")
+        for w in inspection_warnings:
+            lines.append(f"  - {w}")
+    if validation_issues:
+        lines.append("**Validation issues:**")
+        for v in validation_issues:
+            lines.append(f"  - {v}")
+    if response_issue:
+        lines.append(f"**API response concern:** {response_issue}")
+    lines.append(f"\n`tenancyId: {tenancy_id}`")
+
+    payload = {"content": "\n".join(lines)}
+    if DISCORD_MENTION_USER_ID:
+        payload["allowed_mentions"] = {"users": [DISCORD_MENTION_USER_ID]}
+    post_discord_payload(payload)
 
 
 def process_listing(apt, seen_states, is_first_run):
@@ -262,11 +460,16 @@ def process_listing(apt, seen_states, is_first_run):
     # Evaluate criteria
     matches, reason = check_criteria(apt)
 
+    inspection = inspect_listing(apt)
+    if inspection["warnings"]:
+        print(f"[INSPECT] {apt_id}: {inspection['warnings']}")
+    if inspection["unexpected_keys"]:
+        print(f"[INSPECT] {apt_id} has unexpected listing keys: {inspection['unexpected_keys']}")
+
     applied_status = "Not Applied"
     booking_time = "N/A"
     app_success = False
 
-    # Apply if criteria matched and it's actually newly available
     if matches and status == "Available":
         print(f"Match found! Applying to {apt_id}...")
         app_success, apply_result = attempt_application(apt)
@@ -306,7 +509,7 @@ def process_listing(apt, seen_states, is_first_run):
                     {"name": "Address", "value": f"{street}, {address.get('zipCode')} {address.get('city')}", "inline": False},
                     {"name": "Application Status", "value": applied_status, "inline": False},
                     {"name": "Booking Time Requested", "value": booking_time, "inline": False},
-                ],
+                ] + ([{"name": ":warning: Inspection Warnings", "value": "\n".join(inspection["warnings"])[:1024], "inline": False}] if inspection["warnings"] else []),
                 "footer": {"text": f"Kereby Watcher - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
             }
         ]
