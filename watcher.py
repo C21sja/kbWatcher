@@ -467,17 +467,12 @@ def process_listing(apt, seen_states, is_first_run):
         print(f"[INSPECT] {apt_id} has unexpected listing keys: {inspection['unexpected_keys']}")
 
     applied_status = "Not Applied"
-    booking_time = "N/A"
     app_success = False
 
     if matches and status == "Available":
-        print(f"Match found! Applying to {apt_id}...")
-        app_success, apply_result = attempt_application(apt)
-        if app_success:
-            applied_status = "Successfully Applied!"
-            booking_time = apply_result
-        else:
-            applied_status = f"Failed to apply: {apply_result}"
+        print(f"Match found! Alerting for {apt_id} (auto-apply disabled)...")
+        applied_status = "Match found — apply manually!"
+        app_success = True
     elif status == "Available":
          applied_status = f"Skipped: {reason}"
     else:
@@ -508,7 +503,6 @@ def process_listing(apt, seen_states, is_first_run):
                     {"name": "Size", "value": f"{size_val} m2", "inline": True},
                     {"name": "Address", "value": f"{street}, {address.get('zipCode')} {address.get('city')}", "inline": False},
                     {"name": "Application Status", "value": applied_status, "inline": False},
-                    {"name": "Booking Time Requested", "value": booking_time, "inline": False},
                 ] + ([{"name": ":warning: Inspection Warnings", "value": "\n".join(inspection["warnings"])[:1024], "inline": False}] if inspection["warnings"] else []),
                 "footer": {"text": f"Kereby Watcher - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
             }
