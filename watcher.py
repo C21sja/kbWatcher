@@ -427,6 +427,7 @@ def process_listing(apt, seen_states, is_first_run):
     apt_id = apt.get("id")
     if not apt_id:
         return
+    apt_id = str(apt_id)
 
     status = apt.get("state", "Unknown")
     
