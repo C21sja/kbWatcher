@@ -456,6 +456,7 @@ def process_listing(apt, seen_states, is_first_run):
     # to avoid spamming 70+ discord messages and applications when creating the initial DB.
     if is_first_run:
         seen_states[apt_id] = status
+        save_seen_states(seen_states)
         return
 
     # Evaluate criteria
