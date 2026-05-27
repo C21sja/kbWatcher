@@ -40,11 +40,18 @@ USER_PHONE = os.environ.get("USER_PHONE", "12345678")
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 try:
-    RUN_COUNT = int(os.environ.get("WATCHER_RUNS", 440))
     SLEEP_SECONDS = int(os.environ.get("WATCHER_SLEEP_SECONDS", 45))
 except ValueError:
-    RUN_COUNT = 440
     SLEEP_SECONDS = 45
+
+# Max runtime in seconds. The script will exit gracefully before this deadline,
+# leaving a buffer for state persistence and git push.
+try:
+    MAX_RUNTIME_SECONDS = int(os.environ.get("WATCHER_MAX_RUNTIME_SECONDS", 5 * 3600))
+except ValueError:
+    MAX_RUNTIME_SECONDS = 5 * 3600
+
+EXIT_BUFFER_SECONDS = 120
 
 
 def get_next_workday_11am():
@@ -446,7 +453,6 @@ def process_listing(apt, seen_states, is_first_run):
 
     if "p-plads" in title or "p-plads" in street or size <= 0.0:
         seen_states[apt_id] = status
-        save_seen_states(seen_states)
         return
 
     # New or updated listing!
@@ -456,7 +462,6 @@ def process_listing(apt, seen_states, is_first_run):
     # to avoid spamming 70+ discord messages and applications when creating the initial DB.
     if is_first_run:
         seen_states[apt_id] = status
-        save_seen_states(seen_states)
         return
 
     # Evaluate criteria
@@ -518,7 +523,6 @@ def process_listing(apt, seen_states, is_first_run):
     print(f"Processed {apt_id}: {applied_status}")
 
     seen_states[apt_id] = status
-    save_seen_states(seen_states)
 
 
 def fetch_apartments():
@@ -568,32 +572,61 @@ def main():
         if is_first_run:
             print("First run detected. Caching existing properties without screaming in Discord.")
 
-        for run_num in range(1, RUN_COUNT + 1):
-            print(f"--- Run {run_num}/{RUN_COUNT} - {datetime.now().strftime('%H:%M:%S')} ---")
+        start_time = time.monotonic()
+        deadline = start_time + MAX_RUNTIME_SECONDS - EXIT_BUFFER_SECONDS
+        run_num = 0
+
+        while True:
+            run_num += 1
+            elapsed = time.monotonic() - start_time
+            remaining = deadline - time.monotonic()
+
+            if remaining <= 0:
+                print(f"Deadline reached after {run_num - 1} polls ({elapsed:.0f}s elapsed). Exiting cleanly.")
+                break
+
+            print(f"--- Poll {run_num} - {datetime.now().strftime('%H:%M:%S')} - {remaining/60:.1f}min remaining ---")
             items = fetch_apartments()
             print(f"Fetched {len(items)} properties.")
 
+            state_changed = False
             for item in items:
                 try:
+                    old_status = seen_states.get(str(item.get("id", "")))
                     process_listing(item, seen_states, is_first_run)
+                    if seen_states.get(str(item.get("id", ""))) != old_status:
+                        state_changed = True
                 except Exception as e:
                     print(f"Error processing item: {e}")
                     try:
                         post_discord_error(f"Error processing listing {item.get('id', 'Unknown')}: {e}")
                     except:
                         pass
-            
-            # After the first pass, it is no longer the first run ever
+
+            if state_changed or is_first_run:
+                save_seen_states(seen_states)
+
             if is_first_run:
                 is_first_run = False
-                
-            if run_num < RUN_COUNT:
-                time.sleep(SLEEP_SECONDS)
-                
+
+            remaining = deadline - time.monotonic()
+            if remaining <= SLEEP_SECONDS:
+                print(f"Not enough time for another cycle ({remaining:.0f}s left). Exiting cleanly.")
+                break
+
+            time.sleep(SLEEP_SECONDS)
+
+        total_elapsed = time.monotonic() - start_time
+        print(f"Watcher finished: {run_num} polls over {total_elapsed/60:.1f} minutes.")
+
     except Exception as e:
         import traceback
         err = traceback.format_exc()
         print(f"Fatal error in main loop: {err}")
+        try:
+            save_seen_states(seen_states)
+        except:
+            pass
         try:
             post_discord_error(f"Fatal Exception in Watcher:\n{err[-1500:]}")
         except:
