@@ -2,12 +2,18 @@ name: Kereby Watcher
 
 on:
   schedule:
-    # Run every 3 hours. The script self-terminates after ~2h50m,
-    # leaving a comfortable buffer before the next scheduled run.
-    - cron: '0 */3 * * *'
+    # Trigger hourly. Each job self-terminates after ~70min (see
+    # WATCHER_MAX_RUNTIME_SECONDS), which is longer than this 60min interval, so
+    # a fresh run is always queued and — serialised by the concurrency group
+    # below — starts the instant the previous one exits. That yields continuous
+    # coverage (no blind gaps) and survives GitHub's occasional late/dropped
+    # cron ticks, since the running job keeps polling until the next one lands.
+    - cron: '0 * * * *'
   workflow_dispatch: # Allow manual trigger
 
 concurrency:
+  # Serialise runs: at most one watcher active, with the next held pending so it
+  # takes over immediately at handoff (no overlap => no double-polling/applying).
   group: watcher-group
   cancel-in-progress: false
 
@@ -17,7 +23,7 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 75
 
     steps:
       - name: Checkout repository
@@ -36,8 +42,13 @@ jobs:
           USER_EMAIL: ${{ secrets.USER_EMAIL }}
           USER_PHONE: ${{ secrets.USER_PHONE }}
           USER_MESSAGE: ${{ secrets.USER_MESSAGE }}
-          WATCHER_MAX_RUNTIME_SECONDS: 10200  # 2h50m — exits ~2min early for state persist
-          WATCHER_SLEEP_SECONDS: 45
+          WATCHER_MAX_RUNTIME_SECONDS: 4200  # 70min — exits ~2min early to persist state; > 60min cron so runs overlap-handoff
+          # Adaptive, Copenhagen-time-aware polling is ON by default. In the peak
+          # window it is cache-synced: the feed is CloudFront-cached ~30s, so we
+          # use the response Age header to poll just after each refresh (~1-2s
+          # latency, ~1 request/cycle) instead of hammering. Off-hours back off to
+          # 120-300s. Tune via WATCHER_POLL_*_SECONDS, WATCHER_CDN_CACHE_TTL,
+          # WATCHER_CACHE_SYNC_MARGIN/MIN, or WATCHER_ADAPTIVE_POLLING=false.
         run: python watcher.py
 
       - name: Persist watcher state

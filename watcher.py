@@ -39,19 +39,132 @@ USER_EMAIL = os.environ.get("USER_EMAIL", "test@example.com")
 USER_PHONE = os.environ.get("USER_PHONE", "12345678")
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
-try:
-    SLEEP_SECONDS = int(os.environ.get("WATCHER_SLEEP_SECONDS", 45))
-except ValueError:
-    SLEEP_SECONDS = 45
+def _env_int(name, default, minimum=None):
+    try:
+        val = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        val = default
+    if minimum is not None and val < minimum:
+        val = minimum
+    return val
+
+
+# Constant interval used only when adaptive polling is disabled.
+SLEEP_SECONDS = _env_int("WATCHER_SLEEP_SECONDS", 45, minimum=1)
 
 # Max runtime in seconds. The script will exit gracefully before this deadline,
 # leaving a buffer for state persistence and git push.
-try:
-    MAX_RUNTIME_SECONDS = int(os.environ.get("WATCHER_MAX_RUNTIME_SECONDS", 5 * 3600))
-except ValueError:
-    MAX_RUNTIME_SECONDS = 5 * 3600
+MAX_RUNTIME_SECONDS = _env_int("WATCHER_MAX_RUNTIME_SECONDS", 5 * 3600)
 
 EXIT_BUFFER_SECONDS = 120
+
+# --- Adaptive polling ------------------------------------------------------
+# Kereby (Jorato) publishes and re-lists tenancies almost exclusively during
+# Copenhagen business hours: residential listings observed only 10:00-15:00 CPH,
+# the broader 2026 rhythm 08:00-16:00 (peak ~13:00), weekdays only. Freed flats
+# also flip Available -> Reserved within ~90s-5min. So we poll fast during that
+# window to catch the short openings and back off hard overnight/weekends when
+# nothing ever happens. Net effect: better hit-rate AND fewer total API calls
+# than a flat 45s cadence.
+ADAPTIVE_POLLING = os.environ.get("WATCHER_ADAPTIVE_POLLING", "true").strip().lower() != "false"
+
+# Poll interval (seconds) per activity tier. Floored at 10s to stay polite.
+POLL_INTERVALS = {
+    "HOT": _env_int("WATCHER_POLL_HOT_SECONDS", 20, minimum=10),
+    "WARM": _env_int("WATCHER_POLL_WARM_SECONDS", 45, minimum=10),
+    "COOL": _env_int("WATCHER_POLL_COOL_SECONDS", 120, minimum=10),
+    "COLD": _env_int("WATCHER_POLL_COLD_SECONDS", 300, minimum=10),
+}
+
+# Copenhagen-local hour windows -> tier (start inclusive, end exclusive).
+# Any hour not covered here falls through to COLD.
+WEEKDAY_TIER_WINDOWS = [
+    (10, 15, "HOT"),   # core publishing window, peak ~13:00 CPH
+    (8, 10, "WARM"),   # morning ramp-up
+    (15, 17, "WARM"),  # afternoon tail
+    (7, 8, "COOL"),
+    (17, 22, "COOL"),  # occasional evening changes
+]
+WEEKEND_TIER_WINDOWS = [
+    (9, 18, "COOL"),   # rare, but keep a light watch
+]
+
+# --- Cache-aware polling ---------------------------------------------------
+# The feed is served via CloudFront with a ~30s edge cache, so polling faster
+# than that just re-downloads identical bytes (measured: 5s-apart requests
+# return the same object until Age hits ~30, then it refreshes). In the
+# responsive tiers we instead sync each poll to land just after the next cache
+# refresh using the response's Age header (seconds_to_refresh ~= TTL - Age).
+# This surfaces a new generation within ~CACHE_SYNC_MARGIN seconds while sending
+# only ~1 request per cache cycle — lower latency AND fewer requests than a
+# fixed fast interval.
+CDN_CACHE_TTL_SECONDS = _env_int("WATCHER_CDN_CACHE_TTL", 30, minimum=1)
+CACHE_SYNC_MARGIN_SECONDS = _env_int("WATCHER_CACHE_SYNC_MARGIN", 2, minimum=0)
+CACHE_SYNC_MIN_SECONDS = _env_int("WATCHER_CACHE_SYNC_MIN", 5, minimum=1)
+# Tiers that sync to the cache cycle; all others use their fixed interval.
+CACHE_AWARE_TIERS = {"HOT", "WARM"}
+
+
+def _last_sunday_0100_utc(year, month):
+    """01:00 UTC on the last Sunday of the month — the EU DST switch instant."""
+    d = datetime(year, month, 31, 1, 0, 0, tzinfo=timezone.utc)
+    while d.weekday() != 6:  # 6 == Sunday
+        d -= timedelta(days=1)
+    return d
+
+
+def copenhagen_now(utc_now=None):
+    """Current Copenhagen wall-clock time as a naive datetime.
+
+    Dependency-free DST via the EU rule (CET = UTC+1, CEST = UTC+2; summer time
+    from the last Sunday of March 01:00 UTC to the last Sunday of October 01:00
+    UTC). Avoids zoneinfo/tzdata so the watcher stays zero-dependency everywhere.
+    """
+    if utc_now is None:
+        utc_now = datetime.now(timezone.utc)
+    dst_start = _last_sunday_0100_utc(utc_now.year, 3)
+    dst_end = _last_sunday_0100_utc(utc_now.year, 10)
+    offset = 2 if dst_start <= utc_now < dst_end else 1
+    return (utc_now + timedelta(hours=offset)).replace(tzinfo=None)
+
+
+def classify_period(local_dt):
+    """Map a Copenhagen-local datetime to an activity tier name."""
+    windows = WEEKEND_TIER_WINDOWS if local_dt.weekday() >= 5 else WEEKDAY_TIER_WINDOWS
+    hour = local_dt.hour
+    for start, end, tier in windows:
+        if start <= hour < end:
+            return tier
+    return "COLD"
+
+
+def cache_synced_interval(age):
+    """Seconds to wait so the next poll lands just after the CloudFront refresh.
+
+    `age` is the response's Age header (seconds the cached object has lived).
+    Clamped to a small floor (never busy-loop) and to one cache cycle (never
+    sleep through a full refresh).
+    """
+    remaining = CDN_CACHE_TTL_SECONDS - age + CACHE_SYNC_MARGIN_SECONDS
+    upper = CDN_CACHE_TTL_SECONDS + CACHE_SYNC_MARGIN_SECONDS
+    return int(max(CACHE_SYNC_MIN_SECONDS, min(remaining, upper)))
+
+
+def get_poll_interval_seconds(local_dt=None, age=None):
+    """Seconds to sleep before the next poll.
+
+    Falls back to the flat SLEEP_SECONDS when adaptive polling is disabled.
+    In a cache-aware tier with a known CloudFront Age, sync to the cache refresh
+    cycle; otherwise use the tier's fixed interval.
+    """
+    if not ADAPTIVE_POLLING:
+        return SLEEP_SECONDS
+    if local_dt is None:
+        local_dt = copenhagen_now()
+    tier = classify_period(local_dt)
+    if age is not None and tier in CACHE_AWARE_TIERS:
+        return cache_synced_interval(age)
+    return POLL_INTERVALS[tier]
 
 
 def get_next_workday_11am():
@@ -525,23 +638,34 @@ def process_listing(apt, seen_states, is_first_run):
     seen_states[apt_id] = status
 
 
+def _parse_age(headers):
+    """CloudFront Age header (seconds in edge cache) as int, or None if absent."""
+    try:
+        return int(headers.get("Age"))
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_apartments():
+    """Returns (items, age). `age` is the CloudFront cache Age in seconds, or
+    None when the header is absent (e.g. a cache miss or an error)."""
     req = urllib.request.Request(API_URL, headers=HEADERS)
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             if response.status != 200:
                 print(f"API HTTP issue: {response.status}")
-                return []
+                return [], None
+            age = _parse_age(response.headers)
             raw_data = response.read().decode("utf-8")
             data = json.loads(raw_data)
-            return data.get("items", [])
+            return data.get("items", []), age
     except Exception as e:
         print(f"Error fetching API: {e}")
         try:
             post_discord_error(f"API Fetch Error: {e}")
         except:
             pass
-        return []
+        return [], None
 
 
 def main():
@@ -549,7 +673,7 @@ def main():
         print("--- RUNNING INSTANT TEST MODE ---")
         global DRY_RUN
         DRY_RUN = True
-        items = fetch_apartments()
+        items, _ = fetch_apartments()
         if items:
             apt = items[0]
             # Mock the apartment data so it perfectly passes all criteria checks
@@ -585,9 +709,11 @@ def main():
                 print(f"Deadline reached after {run_num - 1} polls ({elapsed:.0f}s elapsed). Exiting cleanly.")
                 break
 
-            print(f"--- Poll {run_num} - {datetime.now().strftime('%H:%M:%S')} - {remaining/60:.1f}min remaining ---")
-            items = fetch_apartments()
-            print(f"Fetched {len(items)} properties.")
+            local_now = copenhagen_now()
+            tier = classify_period(local_now) if ADAPTIVE_POLLING else "FIXED"
+            print(f"--- Poll {run_num} [{tier}] - CPH {local_now.strftime('%a %H:%M:%S')} - {remaining/60:.1f}min remaining ---")
+            items, cache_age = fetch_apartments()
+            print(f"Fetched {len(items)} properties (CDN cache age: {cache_age}s).")
 
             state_changed = False
             for item in items:
@@ -610,11 +736,13 @@ def main():
                 is_first_run = False
 
             remaining = deadline - time.monotonic()
-            if remaining <= SLEEP_SECONDS:
-                print(f"Not enough time for another cycle ({remaining:.0f}s left). Exiting cleanly.")
+            interval = get_poll_interval_seconds(local_dt=local_now, age=cache_age)
+            if remaining <= interval:
+                print(f"Not enough time for another cycle ({remaining:.0f}s left, next poll would be in {interval}s). Exiting cleanly.")
                 break
 
-            time.sleep(SLEEP_SECONDS)
+            print(f"Sleeping {interval}s (tier {tier}, cache age {cache_age}s).")
+            time.sleep(interval)
 
         total_elapsed = time.monotonic() - start_time
         print(f"Watcher finished: {run_num} polls over {total_elapsed/60:.1f} minutes.")
