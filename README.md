@@ -16,6 +16,7 @@ An automated, long-running Python script that monitors the Kereby Udlejning back
 To run this script (locally or in GitHub Actions), the following environment variables need to be configured:
 
 - `DISCORD_WEBHOOK_URL`: The webhook URL for the Discord channel where alerts will be sent.
+- `DISCORD_INSTANT_WEBHOOK_URL`: (Optional) Webhook URL for a private Discord channel that receives listing alerts immediately.
 - `DISCORD_MENTION_USER_ID`: (Optional) Your Discord User ID to ping you directly upon a successful application.
 - `USER_NAME`: Your full name to be submitted in the viewing request.
 - `USER_EMAIL`: Your email address for contact.

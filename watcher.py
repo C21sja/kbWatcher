@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -32,6 +33,7 @@ KNOWN_PAYLOAD_FIELDS = {
 }
 
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+INSTANT_WEBHOOK_URL = os.environ.get("DISCORD_INSTANT_WEBHOOK_URL")
 DISCORD_MENTION_USER_ID = os.environ.get("DISCORD_MENTION_USER_ID")
 
 USER_NAME = os.environ.get("USER_NAME", "Test Testsen")
@@ -48,6 +50,7 @@ def _env_int(name, default, minimum=None):
         val = minimum
     return val
 
+PUBLIC_NOTIFY_DELAY_SECONDS = 45
 
 # Constant interval used only when adaptive polling is disabled.
 SLEEP_SECONDS = _env_int("WATCHER_SLEEP_SECONDS", 45, minimum=1)
@@ -305,13 +308,14 @@ def save_seen_states(states):
             print(f"Error saving seen states: {e}")
 
 
-def post_discord_payload(payload):
-    if not WEBHOOK_URL:
+def post_discord_payload(payload, webhook_url=None):
+    url = webhook_url if webhook_url is not None else WEBHOOK_URL
+    if not url:
         print("Webhook URL not configured.")
         return False
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        WEBHOOK_URL,
+        url,
         data=data,
         headers={"Content-Type": "application/json", "User-Agent": HEADERS["User-Agent"]},
     )
@@ -610,29 +614,47 @@ def process_listing(apt, seen_states, is_first_run):
 
     mention = build_discord_mention() if app_success else ""
     content = f"{mention} :rotating_light: **{title_prefix}: {street}** :rotating_light:"
-    
-    message = {
-        "content" : content.strip(),
-        "embeds": [
-            {
-                "title": f"[{status}] {apt.get('title', 'Unknown Title')}",
-                "color": embed_color,
-                "fields": [
-                    {"name": "Status", "value": status, "inline": True},
-                    {"name": "Rent", "value": f"{rent_val} kr/mo", "inline": True},
-                    {"name": "Size", "value": f"{size_val} m2", "inline": True},
-                    {"name": "Address", "value": f"{street}, {address.get('zipCode')} {address.get('city')}", "inline": False},
-                    {"name": "Application Status", "value": applied_status, "inline": False},
-                ] + ([{"name": ":warning: Inspection Warnings", "value": "\n".join(inspection["warnings"])[:1024], "inline": False}] if inspection["warnings"] else []),
-                "footer": {"text": f"Kereby Watcher - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
-            }
-        ]
-    }
 
-    if app_success and DISCORD_MENTION_USER_ID:
-         message["allowed_mentions"] = {"users": [DISCORD_MENTION_USER_ID]}
+    fields = [
+        {"name": "Status", "value": status, "inline": True},
+        {"name": "Rent", "value": f"{rent_val} kr/mo", "inline": True},
+        {"name": "Size", "value": f"{size_val} m2", "inline": True},
+        {"name": "Address", "value": f"{street}, {address.get('zipCode')} {address.get('city')}", "inline": False},
+        {"name": "Application Status", "value": applied_status, "inline": False},
+    ]
+    if inspection["warnings"]:
+        fields.append({
+            "name": ":warning: Inspection Warnings",
+            "value": "\n".join(inspection["warnings"])[:1024],
+            "inline": False,
+        })
 
-    post_discord_payload(message)
+    def build_message():
+        message = {
+            "content": content.strip(),
+            "embeds": [
+                {
+                    "title": f"[{status}] {apt.get('title', 'Unknown Title')}",
+                    "color": embed_color,
+                    "fields": fields,
+                    "footer": {"text": f"Kereby Watcher - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"},
+                }
+            ],
+        }
+        if app_success and DISCORD_MENTION_USER_ID:
+            message["allowed_mentions"] = {"users": [DISCORD_MENTION_USER_ID]}
+        return message
+
+    if INSTANT_WEBHOOK_URL:
+        post_discord_payload(build_message(), INSTANT_WEBHOOK_URL)
+
+    def post_public():
+        post_discord_payload(build_message(), WEBHOOK_URL)
+
+    timer = threading.Timer(PUBLIC_NOTIFY_DELAY_SECONDS, post_public)
+    timer.daemon = True
+    timer.start()
+
     print(f"Processed {apt_id}: {applied_status}")
 
     seen_states[apt_id] = status

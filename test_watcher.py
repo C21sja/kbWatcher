@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 import watcher
 
@@ -23,6 +24,29 @@ def make_listing(apt_id="apt-1", state="Unavailable"):
     }
 
 
+class FakeTimer:
+    """Captures threading.Timer without sleeping; tests fire callbacks manually."""
+
+    pending = []
+
+    def __init__(self, interval, function, args=None, kwargs=None):
+        self.interval = interval
+        self.function = function
+        self.args = args or ()
+        self.kwargs = kwargs or {}
+        self.daemon = False
+
+    def start(self):
+        FakeTimer.pending.append(self)
+
+    def cancel(self):
+        if self in FakeTimer.pending:
+            FakeTimer.pending.remove(self)
+
+    def fire(self):
+        self.function(*self.args, **self.kwargs)
+
+
 class ProcessListingTests(unittest.TestCase):
     def test_first_run_caches_state_in_memory_only(self):
         # On the first run, process_listing records state in the in-memory dict
@@ -31,6 +55,123 @@ class ProcessListingTests(unittest.TestCase):
         seen_states = {}
         watcher.process_listing(make_listing(), seen_states, is_first_run=True)
         self.assertEqual(seen_states, {"apt-1": "Unavailable"})
+
+
+class DualWebhookNotifyTests(unittest.TestCase):
+    def setUp(self):
+        FakeTimer.pending = []
+        self.posts = []
+        self._orig_webhook = watcher.WEBHOOK_URL
+        self._orig_instant = watcher.INSTANT_WEBHOOK_URL
+        self._orig_delay = watcher.PUBLIC_NOTIFY_DELAY_SECONDS
+        watcher.WEBHOOK_URL = "https://discord.example/public"
+        watcher.INSTANT_WEBHOOK_URL = "https://discord.example/instant"
+        watcher.PUBLIC_NOTIFY_DELAY_SECONDS = 45
+
+    def tearDown(self):
+        watcher.WEBHOOK_URL = self._orig_webhook
+        watcher.INSTANT_WEBHOOK_URL = self._orig_instant
+        watcher.PUBLIC_NOTIFY_DELAY_SECONDS = self._orig_delay
+        FakeTimer.pending = []
+
+    def _record_post(self, payload, webhook_url=None):
+        self.posts.append(
+            {
+                "payload": payload,
+                "webhook_url": webhook_url if webhook_url is not None else watcher.WEBHOOK_URL,
+            }
+        )
+        return True
+
+    def test_instant_fires_immediately_public_after_delay(self):
+        seen_states = {}
+        with mock.patch.object(watcher, "post_discord_payload", side_effect=self._record_post), \
+             mock.patch("watcher.threading.Timer", FakeTimer):
+            watcher.process_listing(
+                make_listing(state="Available"),
+                seen_states,
+                is_first_run=False,
+            )
+
+            self.assertEqual(len(self.posts), 1)
+            self.assertEqual(self.posts[0]["webhook_url"], watcher.INSTANT_WEBHOOK_URL)
+            self.assertEqual(len(FakeTimer.pending), 1)
+            self.assertEqual(FakeTimer.pending[0].interval, 45)
+
+            FakeTimer.pending[0].fire()
+
+            self.assertEqual(len(self.posts), 2)
+            self.assertEqual(self.posts[1]["webhook_url"], watcher.WEBHOOK_URL)
+
+        self.assertEqual(seen_states, {"apt-1": "Available"})
+
+    def test_public_payload_shape_unchanged_aside_from_footer_time(self):
+        seen_states = {}
+        with mock.patch.object(watcher, "post_discord_payload", side_effect=self._record_post), \
+             mock.patch("watcher.threading.Timer", FakeTimer):
+            watcher.process_listing(
+                make_listing(state="Available"),
+                seen_states,
+                is_first_run=False,
+            )
+            FakeTimer.pending[0].fire()
+
+        public = self.posts[1]["payload"]
+        self.assertIn("content", public)
+        self.assertIn("embeds", public)
+        embed = public["embeds"][0]
+        field_names = [f["name"] for f in embed["fields"]]
+        self.assertEqual(
+            field_names[:5],
+            ["Status", "Rent", "Size", "Address", "Application Status"],
+        )
+        self.assertTrue(embed["footer"]["text"].startswith("Kereby Watcher - "))
+        blob = json.dumps(public)
+        self.assertNotIn("delay", blob.lower())
+        self.assertNotIn("45", embed["footer"]["text"])
+        self.assertNotIn("buffer", blob.lower())
+
+    def test_public_footer_stamped_at_send_not_at_detect(self):
+        seen_states = {}
+        times = iter(
+            [
+                datetime(2026, 7, 16, 12, 0, 0),  # instant send
+                datetime(2026, 7, 16, 12, 0, 45),  # public send
+            ]
+        )
+
+        with mock.patch.object(watcher, "post_discord_payload", side_effect=self._record_post), \
+             mock.patch("watcher.threading.Timer", FakeTimer), \
+             mock.patch("watcher.datetime") as mock_dt:
+            mock_dt.now.side_effect = lambda: next(times)
+            mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
+
+            watcher.process_listing(
+                make_listing(state="Available"),
+                seen_states,
+                is_first_run=False,
+            )
+            FakeTimer.pending[0].fire()
+
+        instant_footer = self.posts[0]["payload"]["embeds"][0]["footer"]["text"]
+        public_footer = self.posts[1]["payload"]["embeds"][0]["footer"]["text"]
+        self.assertEqual(instant_footer, "Kereby Watcher - 2026-07-16 12:00:00")
+        self.assertEqual(public_footer, "Kereby Watcher - 2026-07-16 12:00:45")
+
+    def test_no_instant_webhook_still_schedules_public(self):
+        watcher.INSTANT_WEBHOOK_URL = None
+        seen_states = {}
+        with mock.patch.object(watcher, "post_discord_payload", side_effect=self._record_post), \
+             mock.patch("watcher.threading.Timer", FakeTimer):
+            watcher.process_listing(
+                make_listing(state="Available"),
+                seen_states,
+                is_first_run=False,
+            )
+            self.assertEqual(self.posts, [])
+            FakeTimer.pending[0].fire()
+            self.assertEqual(len(self.posts), 1)
+            self.assertEqual(self.posts[0]["webhook_url"], watcher.WEBHOOK_URL)
 
 
 class SaveSeenStatesTests(unittest.TestCase):
