@@ -97,7 +97,7 @@
   "f4269b53-1d0d-4b33-9012-04ab091fe751": "Reserved",
   "a4827696-3de1-4e3c-bc8c-a230d9a4e2d9": "Unavailable",
   "17d40ae0-ff88-431d-a4d9-686f6a9218c6": "Unavailable",
-  "c88af3a0-a41d-48a8-a034-f6e4dd48a483": "Reserved",
+  "c88af3a0-a41d-48a8-a034-f6e4dd48a483": "Unavailable",
   "0a95612e-cb59-45f8-a40b-77115e097577": "Reserved",
   "5c940658-e129-4bb8-82ef-41600970a867": "Unavailable",
   "86d450bf-47ad-4e00-99ab-2df99049360a": "Unavailable",
@@ -154,8 +154,8 @@
   "89b36fff-4c48-495c-a5cc-acb1848782ec": "Reserved",
   "6198b5ca-8b76-4d10-a1e3-1b8b8e45e401": "Reserved",
   "89c743e6-2b52-4f6d-9655-dba451a47b45": "Reserved",
-  "27176817-3ffe-4e72-ab87-836421e9b29c": "Reserved",
-  "684f9b8a-0e9d-4084-9061-18e66b10b66b": "Reserved",
+  "27176817-3ffe-4e72-ab87-836421e9b29c": "Unavailable",
+  "684f9b8a-0e9d-4084-9061-18e66b10b66b": "Unavailable",
   "a24f73ed-2d42-471d-8aa7-bd731b814ba6": "Reserved",
   "7e314700-0b92-483e-b864-405824646896": "Reserved",
   "73fd85db-338f-4a25-ba54-810172449b7c": "Reserved",
@@ -164,5 +164,6 @@
   "79b0ef69-8058-4279-8c7b-8a0ad495bb38": "Reserved",
   "ce9eee69-c938-4ee2-88c3-dba9e151bca7": "Reserved",
   "024a859f-c74e-42a9-84d2-e6827815b626": "Reserved",
-  "8865070b-87e0-4d7b-ae2f-4e403bfd113e": "Reserved"
+  "8865070b-87e0-4d7b-ae2f-4e403bfd113e": "Reserved",
+  "7be241c4-a37b-4767-ba23-79e33de73ed6": "Available"
 }
